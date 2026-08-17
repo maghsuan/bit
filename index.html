@@ -90,7 +90,7 @@
   .flashmark{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
     font-family:var(--mono);font-weight:700;font-size:clamp(60px,16vw,160px);color:#5ee08a;
     pointer-events:none;opacity:0;text-shadow:0 0 30px rgba(94,224,138,.5)}
-  .flashmark.go{animation:mark .42s ease}
+  .flashmark.go{animation:mark var(--gap,250ms) ease}
   @keyframes mark{0%{opacity:0}30%{opacity:1}100%{opacity:0}}
 
   /* ---------- start / end overlays ---------- */
@@ -119,6 +119,8 @@
   .stats>div{display:flex;flex-direction:column;gap:6px}
   .sk{font-size:clamp(11px,1.8vw,14px);color:var(--mute);letter-spacing:.18em}
   .sv{font-size:clamp(20px,4.2vw,34px);color:var(--cool);font-weight:700;font-variant-numeric:tabular-nums}
+  .statnote{font-family:var(--mono);font-size:clamp(11px,2vw,15px);color:#5c6875;line-height:1.8;
+    max-width:44ch;font-variant-numeric:tabular-nums}
 
   /* start-screen options */
   .opts{display:flex;flex-direction:column;gap:10px;align-items:center}
@@ -223,6 +225,14 @@
         </div>
       </div>
       <div class="optrow">
+        <span class="optk">換題速度</span>
+        <div class="modes tiny" id="gapOpts">
+          <button class="mode" data-g="100">極速</button>
+          <button class="mode sel" data-g="250">快</button>
+          <button class="mode" data-g="420">標準</button>
+        </div>
+      </div>
+      <div class="optrow">
         <span class="optk">離開判定</span>
         <div class="modes tiny" id="idleOpts">
           <button class="mode" data-s="5">5 秒</button>
@@ -291,6 +301,7 @@
       <div><span class="sk">最快</span><span class="sv" id="statBest">–</span></div>
       <div><span class="sk">計時題數</span><span class="sv" id="statN">0</span></div>
     </div>
+    <div class="statnote" id="statNote"></div>
     <button class="btn" id="againBtn">再玩一次</button>
   </div>
 
@@ -313,12 +324,14 @@
   let mode='random', pool=[], selected=new Set();
   const timedTotal=60;
 
-  // per-question stopwatch
+  // per-question stopwatch (+ a session clock so the end screen can reconcile to the wall clock)
   let times=[], qStart=0, qAcc=0, qOn=false, qCounted=true;
+  let answerSec=0, sesStart=0, sesAcc=0, sesOn=false, sesN=0;
   let paused=false, away=false, idleTid=null, cdTid=null, toastTid=null;
   // how a break is handled: 'reset' = go away, come back, average starts over
   //                         'pause' = pause screen + 3-2-1 count-in, that question dropped
   let breakMode='reset', idleMs=8000;
+  let gapMs=250;   // answered → next target on screen
 
   const value = () => bits.reduce((a,b,i)=>a+b*PLACE[i],0);
 
@@ -340,6 +353,11 @@
   function qBegin(){ qAcc=0; qStart=performance.now(); qOn=true; qCounted=true; armIdle(); }
   function qHold(){ if(qOn){ qAcc += performance.now()-qStart; qOn=false; } clearTimeout(idleTid); }
   function qSecs(){ return (qAcc + (qOn ? performance.now()-qStart : 0)) / 1000; }
+  // session clock: wall time minus anything spent paused / away
+  function sesBegin(){ answerSec=0; sesN=0; sesAcc=0; sesStart=performance.now(); sesOn=true; }
+  function sesHold(){ if(sesOn){ sesAcc += performance.now()-sesStart; sesOn=false; } }
+  function sesGo(){ if(!sesOn){ sesStart=performance.now(); sesOn=true; } }
+  function sesSecs(){ return (sesAcc + (sesOn ? performance.now()-sesStart : 0)) / 1000; }
   function armIdle(){
     clearTimeout(idleTid);
     if (!running || paused || away) return;
@@ -366,8 +384,10 @@
 
   function correct(){
     locked = true;
-    if (qCounted) times.push(qSecs());
-    qHold();
+    const el = qSecs();
+    answerSec += el; sesN++;          // every question's thinking time, counted or not
+    if (qCounted) times.push(el);
+    qHold(); qAcc = 0;                // zero it: the ✓ animation belongs to no question
     score++; scoreV.textContent = score; showAvg();
     field.classList.add('correct');
     mark.classList.add('go');
@@ -378,13 +398,13 @@
       nextTarget(); render();
       locked = false;
       if (running && !paused) qBegin();
-    }, 420);
+    }, gapMs);
   }
 
   // ---- break handling A: away / auto-reset (no buttons) ----
   function goAway(why){
     if (!running || away || paused) return;
-    away = true; qHold();
+    away = true; qHold(); sesHold();
     clearInterval(tid); tid = null;                  // the clock waits for you
     field.classList.add('away');
     const note = $('#awayNote');
@@ -400,6 +420,7 @@
     times = []; showAvg();                            // fresh average for this new sitting
     qCounted = false;                                 // this half-done question doesn't count
     qAcc = 0; qStart = performance.now(); qOn = true;
+    sesBegin();                                       // the breakdown restarts too
     if (mode === 'random' && !tid) tid = setInterval(tick, 1000);
     toast('平均重新計算');
   }
@@ -415,7 +436,7 @@
   function pauseGame(why){
     if (!running || paused) return;
     paused = true; qCounted = false;          // this question no longer counts
-    qHold(); clearInterval(tid);
+    qHold(); sesHold(); clearInterval(tid);
     $('#pauseWhy').textContent =
       why === 'idle' ? '超過 ' + (idleMs/1000) + ' 秒沒有動作，已自動暫停。' :
       why === 'away' ? '你切換到別的畫面，已自動暫停。' :
@@ -429,7 +450,7 @@
     countIn(3, ()=>{
       paused = false;
       qAcc = 0; qStart = performance.now(); qOn = true;   // re-time from here, but not counted
-      armIdle();
+      sesGo(); armIdle();
       if (mode === 'random'){ clearInterval(tid); tid = setInterval(tick, 1000); }
     });
   }
@@ -483,20 +504,27 @@
     running = true; locked = false; paused = false; away = false;
     clearInterval(tid); clearInterval(cdTid);
     if (timed) tid = setInterval(tick, 1000);
-    qBegin();
+    qBegin(); sesBegin();
     initAudio();
   }
 
   function endGame(){
     clearInterval(tid); clearInterval(cdTid); clearTimeout(idleTid);
-    running = false; paused = false; away = false; qHold();
+    answerSec += qSecs();                    // the question that was still open
+    running = false; paused = false; away = false; qHold(); sesHold();
     field.classList.remove('away'); $('#awayNote').classList.add('hidden');
-    const a = avgSecs();
+    const a = avgSecs(), total = sesSecs(), gap = Math.max(0, total - answerSec);
     $('#endTitle').textContent = (mode === 'practice') ? '練習結束' : (timeLeft > 0 ? '結束' : '時間到');
     $('#finalV').textContent = score;
-    $('#statAvg').textContent  = a == null ? '–' : a.toFixed(1) + ' 秒';
-    $('#statBest').textContent = times.length ? Math.min(...times).toFixed(1) + ' 秒' : '–';
+    $('#statAvg').textContent  = a == null ? '–' : a.toFixed(2) + ' 秒';
+    $('#statBest').textContent = times.length ? Math.min(...times).toFixed(2) + ' 秒' : '–';
     $('#statN').textContent    = times.length;
+    // where the wall clock actually went — "平均每題" is answering time only
+    $('#statNote').innerHTML = sesN
+      ? (sesN < score ? '中斷後這段 ' : '這局 ') + total.toFixed(1) + ' 秒 ＝ 作答 '
+        + answerSec.toFixed(1) + ' 秒 ＋ 換題動畫 ' + gap.toFixed(1) + ' 秒<br>'
+        + '實際節奏 ' + (total/sesN).toFixed(2) + ' 秒／題（含換題）'
+      : '';
     $('#game').classList.add('hidden'); $('#pause').classList.add('hidden'); $('#cd').classList.add('hidden');
     $('#end').classList.remove('hidden');
   }
@@ -593,7 +621,14 @@
   const OPTS='bb.opts';
   const loadOpts=()=>{ try{ return JSON.parse(localStorage.getItem(OPTS)||'{}'); }catch(e){ return {}; } };
   const saveOpts=()=>{ try{ localStorage.setItem(OPTS, JSON.stringify(
-      {breakMode, idleSecs:idleMs/1000, hint:$('#hint').checked, mode})); }catch(e){} };
+      {breakMode, idleSecs:idleMs/1000, gapMs, hint:$('#hint').checked, mode})); }catch(e){} };
+
+  function setGap(ms){
+    gapMs = ms;
+    document.documentElement.style.setProperty('--gap', ms+'ms');
+    [...$('#gapOpts').children].forEach(el=>el.classList.toggle('sel', +el.dataset.g===ms));
+    saveOpts();
+  }
 
   function setBreak(b){
     breakMode = b;
@@ -610,6 +645,7 @@
   }
   $('#breakModes').addEventListener('click', e=>{ const b=e.target.dataset.b; if(b) setBreak(b); });
   $('#idleOpts').addEventListener('click',  e=>{ const s=e.target.dataset.s; if(s) setIdle(+s); });
+  $('#gapOpts').addEventListener('click',   e=>{ const g=e.target.dataset.g; if(g) setGap(+g); });
   $('#hint').addEventListener('change', saveOpts);
 
   $('#modeRandom').addEventListener('click',()=>setMode('random'));
@@ -623,6 +659,7 @@
     const o = loadOpts();
     setBreak(o.breakMode === 'pause' ? 'pause' : 'reset');
     setIdle([5,8,12].indexOf(o.idleSecs) >= 0 ? o.idleSecs : 8);
+    setGap([100,250,420].indexOf(o.gapMs) >= 0 ? o.gapMs : 250);
     if (typeof o.hint === 'boolean') $('#hint').checked = o.hint;
     setMode(o.mode === 'practice' ? 'practice' : 'random');
   })();
