@@ -116,6 +116,22 @@
   .sk{font-size:clamp(11px,1.8vw,14px);color:var(--mute);letter-spacing:.18em}
   .sv{font-size:clamp(20px,4.2vw,34px);color:var(--cool);font-weight:700;font-variant-numeric:tabular-nums}
 
+  /* start-screen options */
+  .opts{display:flex;flex-direction:column;gap:10px;align-items:center}
+  .optrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center}
+  .optk{font-size:clamp(12px,2.2vw,16px);color:var(--mute);letter-spacing:.1em}
+  .modes.tiny .mode{font-size:clamp(12px,2.2vw,15px);padding:7px 14px}
+
+  /* away (auto-reset break handling) */
+  #field.away{opacity:.34}
+  #awayNote{color:var(--lamp);letter-spacing:.05em;text-align:center}
+  .toast{position:fixed;left:50%;top:13%;transform:translateX(-50%);z-index:7;opacity:0;
+    font-family:var(--mono);font-weight:700;font-size:clamp(14px,2.6vw,20px);color:#241500;
+    background:var(--lamp);border-radius:999px;padding:10px 22px;pointer-events:none;
+    box-shadow:0 0 30px rgba(255,176,32,.45)}
+  .toast.go{animation:toast 1.6s ease forwards}
+  @keyframes toast{0%{opacity:0;transform:translate(-50%,-10px)}12%{opacity:1;transform:translate(-50%,0)}72%{opacity:1}100%{opacity:0}}
+
   /* pause + count-in */
   #cd{background:rgba(10,13,18,.93);gap:0;z-index:6}
   #cdNum{font-family:var(--mono);font-weight:700;line-height:1;color:var(--lamp);
@@ -176,7 +192,7 @@
   <!-- ===== START ===== -->
   <div class="overlay" id="start">
     <h1>二進位<span class="lit">快打</span></h1>
-    <p class="lede">用手指把左邊五盞燈點亮，讓亮燈的位值 <b>16 8 4 2 1</b> 加起來等於目標數字。點對就自動換下一題。<br>每題都會計時，結束時看<b>平均一題幾秒</b>；中途暫停的那一題不列入平均。</p>
+    <p class="lede">用手指把左邊五盞燈點亮，讓亮燈的位值 <b>16 8 4 2 1</b> 加起來等於目標數字。點對就自動換下一題。<br>每題都會計時，結束時看<b>平均一題幾秒</b>。</p>
 
     <div class="modes" role="tablist">
       <button class="mode sel" id="modeRandom">隨機挑戰</button>
@@ -193,6 +209,26 @@
     </div>
 
     <label class="toggle"><input type="checkbox" id="hint" checked> 顯示目前數值（提示）</label>
+
+    <div class="opts">
+      <div class="optrow">
+        <span class="optk">中斷處理</span>
+        <div class="modes tiny" id="breakModes">
+          <button class="mode sel" data-b="reset">自動重算</button>
+          <button class="mode" data-b="pause">暫停繼續</button>
+        </div>
+      </div>
+      <div class="optrow">
+        <span class="optk">離開判定</span>
+        <div class="modes tiny" id="idleOpts">
+          <button class="mode" data-s="5">5 秒</button>
+          <button class="mode sel" data-s="8">8 秒</button>
+          <button class="mode" data-s="12">12 秒</button>
+        </div>
+      </div>
+      <p class="tip" id="breakTip"></p>
+    </div>
+
     <button class="btn" id="startBtn">開始（60 秒）</button>
   </div>
 
@@ -224,9 +260,11 @@
 
     <div class="foot">
       <div id="readout">目前 <span class="bin">00000</span> ＝ <b class="dec">0</b></div>
+      <div class="tip hidden" id="awayNote"></div>
     </div>
   </div>
   <div class="flashmark" id="mark">✓</div>
+  <div class="toast" id="toast">平均重新計算</div>
 
   <!-- ===== PAUSE ===== -->
   <div class="overlay hidden" id="pause">
@@ -273,8 +311,10 @@
 
   // per-question stopwatch
   let times=[], qStart=0, qAcc=0, qOn=false, qCounted=true;
-  let paused=false, idleTid=null, cdTid=null;
-  const IDLE_MS = 20000;   // practice mode: 20s with no tap = you walked away
+  let paused=false, away=false, idleTid=null, cdTid=null, toastTid=null;
+  // how a break is handled: 'reset' = go away, come back, average starts over
+  //                         'pause' = pause screen + 3-2-1 count-in, that question dropped
+  let breakMode='reset', idleMs=8000;
 
   const value = () => bits.reduce((a,b,i)=>a+b*PLACE[i],0);
 
@@ -298,14 +338,22 @@
   function qSecs(){ return (qAcc + (qOn ? performance.now()-qStart : 0)) / 1000; }
   function armIdle(){
     clearTimeout(idleTid);
-    if (!running || paused || mode !== 'practice') return;   // timed mode already has a clock
-    idleTid = setTimeout(()=>pauseGame('idle'), IDLE_MS);
+    if (!running || paused || away) return;
+    // 'pause' mode only auto-pauses in practice — the timed round already has a clock
+    if (breakMode === 'pause' && mode !== 'practice') return;
+    idleTid = setTimeout(()=>leave('idle'), idleMs);
+  }
+  // one entry point for "the player is no longer here"
+  function leave(why){
+    if (breakMode === 'pause'){ cancelCountIn(); pauseGame(why); }
+    else goAway(why);
   }
   const avgSecs = () => times.length ? times.reduce((a,b)=>a+b,0)/times.length : null;
   function showAvg(){ const a=avgSecs(); $('#avgV').textContent = a==null ? '–' : a.toFixed(1)+'s'; }
 
   function toggle(indices){
     if (locked || !running || paused) return;
+    if (away) comeBack();          // the tap that wakes it also counts as a normal tap
     armIdle();
     indices.forEach(i => bits[i] ^= 1);
     render();
@@ -329,13 +377,43 @@
     }, 420);
   }
 
-  // ---- pause / resume ----
+  // ---- break handling A: away / auto-reset (no buttons) ----
+  function goAway(why){
+    if (!running || away || paused) return;
+    away = true; qHold();
+    clearInterval(tid); tid = null;                  // the clock waits for you
+    field.classList.add('away');
+    const note = $('#awayNote');
+    note.textContent = (why === 'away' ? '偵測到你離開了' : '停下來超過 ' + (idleMs/1000) + ' 秒')
+                     + ' · 點任一盞燈繼續，平均會重新計算';
+    note.classList.remove('hidden');
+  }
+
+  function comeBack(){
+    away = false;
+    $('#awayNote').classList.add('hidden');
+    field.classList.remove('away');
+    times = []; showAvg();                            // fresh average for this new sitting
+    qCounted = false;                                 // this half-done question doesn't count
+    qAcc = 0; qStart = performance.now(); qOn = true;
+    if (mode === 'random' && !tid) tid = setInterval(tick, 1000);
+    toast('平均重新計算');
+  }
+
+  function toast(msg){
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.remove('go'); void t.offsetWidth; t.classList.add('go');
+    clearTimeout(toastTid); toastTid = setTimeout(()=>t.classList.remove('go'), 1700);
+  }
+
+  // ---- break handling B: pause / resume ----
   function pauseGame(why){
     if (!running || paused) return;
     paused = true; qCounted = false;          // this question no longer counts
     qHold(); clearInterval(tid);
     $('#pauseWhy').textContent =
-      why === 'idle' ? '超過 20 秒沒有動作，已自動暫停。' :
+      why === 'idle' ? '超過 ' + (idleMs/1000) + ' 秒沒有動作，已自動暫停。' :
       why === 'away' ? '你切換到別的畫面，已自動暫停。' :
                        '休息一下，計時已停住。';
     $('#pause').classList.remove('hidden');
@@ -392,11 +470,13 @@
     times = []; showAvg();
     scoreV.textContent = 0; timeV.textContent = timedTotal; timeEl.classList.remove('low');
     timeEl.classList.toggle('hidden', !timed);       // no clock in practice
-    $('#stopBtn').classList.toggle('hidden', timed);  // stop button only in practice
+    $('#stopBtn').classList.remove('hidden');
+    $('#pauseBtn').classList.toggle('hidden', breakMode !== 'pause');
+    $('#awayNote').classList.add('hidden'); field.classList.remove('away');
     nextTarget(); render();
     $('#start').classList.add('hidden'); $('#end').classList.add('hidden'); $('#pause').classList.add('hidden');
     $('#game').classList.remove('hidden');
-    running = true; locked = false; paused = false;
+    running = true; locked = false; paused = false; away = false;
     clearInterval(tid); clearInterval(cdTid);
     if (timed) tid = setInterval(tick, 1000);
     qBegin();
@@ -405,7 +485,8 @@
 
   function endGame(){
     clearInterval(tid); clearInterval(cdTid); clearTimeout(idleTid);
-    running = false; paused = false; qHold();
+    running = false; paused = false; away = false; qHold();
+    field.classList.remove('away'); $('#awayNote').classList.add('hidden');
     const a = avgSecs();
     $('#endTitle').textContent = (mode === 'practice') ? '練習結束' : (timeLeft > 0 ? '結束' : '時間到');
     $('#finalV').textContent = score;
@@ -438,7 +519,7 @@
   // ---- input: keys 1–5 (desktop testing) ----
   window.addEventListener('keydown', e => {
     if (!running) return;
-    if (e.key === 'Escape' || e.key === 'p' || e.key === 'P'){
+    if (breakMode === 'pause' && (e.key === 'Escape' || e.key === 'p' || e.key === 'P')){
       paused ? resumeGame() : pauseGame('manual');
       return;
     }
@@ -447,9 +528,9 @@
     if (n >= 0) toggle(new Set([n]));
   });
 
-  // leaving the page / locking the phone pauses instead of inflating the average
-  document.addEventListener('visibilitychange', ()=>{ if (document.hidden){ cancelCountIn(); pauseGame('away'); } });
-  window.addEventListener('blur', ()=>{ cancelCountIn(); pauseGame('away'); });
+  // switching apps / locking the phone counts as leaving, whichever break mode is on
+  document.addEventListener('visibilitychange', ()=>{ if (document.hidden) leave('away'); });
+  window.addEventListener('blur', ()=>leave('away'));
 
   // block iOS pinch / double-tap zoom on the play area
   document.addEventListener('gesturestart', e => e.preventDefault());
@@ -492,7 +573,7 @@
     $('#modeRandom').classList.toggle('sel', m==='random');
     $('#modePractice').classList.toggle('sel', m==='practice');
     $('#practicePanel').classList.toggle('hidden', m!=='practice');
-    updateStartBtn();
+    updateStartBtn(); saveOpts();
   }
   function updateStartBtn(){
     const btn=$('#startBtn');
@@ -504,12 +585,43 @@
       btn.textContent='開始（60 秒）'; btn.disabled=false; btn.style.opacity=1;
     }
   }
+  // ---- break-handling options (remembered between sessions) ----
+  const OPTS='bb.opts';
+  const loadOpts=()=>{ try{ return JSON.parse(localStorage.getItem(OPTS)||'{}'); }catch(e){ return {}; } };
+  const saveOpts=()=>{ try{ localStorage.setItem(OPTS, JSON.stringify(
+      {breakMode, idleSecs:idleMs/1000, hint:$('#hint').checked, mode})); }catch(e){} };
+
+  function setBreak(b){
+    breakMode = b;
+    [...$('#breakModes').children].forEach(el=>el.classList.toggle('sel', el.dataset.b===b));
+    $('#breakTip').textContent = b==='reset'
+      ? '離開超過設定秒數就停錶；回來點一下燈直接繼續，平均從這裡重新算。'
+      : '離開會跳出暫停畫面，按「繼續」倒數 3 秒再開始，那一題不列入平均。';
+    saveOpts();
+  }
+  function setIdle(sec){
+    idleMs = sec*1000;
+    [...$('#idleOpts').children].forEach(el=>el.classList.toggle('sel', +el.dataset.s===sec));
+    saveOpts();
+  }
+  $('#breakModes').addEventListener('click', e=>{ const b=e.target.dataset.b; if(b) setBreak(b); });
+  $('#idleOpts').addEventListener('click',  e=>{ const s=e.target.dataset.s; if(s) setIdle(+s); });
+  $('#hint').addEventListener('change', saveOpts);
+
   $('#modeRandom').addEventListener('click',()=>setMode('random'));
   $('#modePractice').addEventListener('click',()=>setMode('practice'));
   $('#stopBtn').addEventListener('click', endGame);
   $('#pauseBtn').addEventListener('click', ()=>pauseGame('manual'));
   $('#resumeBtn').addEventListener('click', resumeGame);
   $('#quitBtn').addEventListener('click', endGame);
+
+  (function initOpts(){
+    const o = loadOpts();
+    setBreak(o.breakMode === 'pause' ? 'pause' : 'reset');
+    setIdle([5,8,12].indexOf(o.idleSecs) >= 0 ? o.idleSecs : 8);
+    if (typeof o.hint === 'boolean') $('#hint').checked = o.hint;
+    setMode(o.mode === 'practice' ? 'practice' : 'random');
+  })();
   updateStartBtn();
 
   $('#startBtn').addEventListener('click', startGame);
