@@ -42,6 +42,8 @@
   .gauge{font-family:var(--mono);letter-spacing:.02em}
   .gauge .k{font-size:clamp(11px,1.6vw,14px);color:var(--mute);text-transform:uppercase;letter-spacing:.22em}
   .gauge .v{font-size:clamp(30px,6vw,52px);font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+  .gauge.small .v{font-size:clamp(18px,3.6vw,32px);color:var(--cool)}
+  .barbtns{display:flex;gap:8px;align-items:center}
   #score .v{color:var(--lamp-hi)}
   #time.low .v{color:var(--warn)}
   #time.low{animation:blink 1s steps(2,start) infinite}
@@ -108,6 +110,19 @@
   .final{font-family:var(--mono);font-size:clamp(20px,4vw,30px);color:var(--mute)}
   .final b{font-size:clamp(64px,16vw,120px);color:var(--lamp-hi);display:block;font-weight:700;line-height:1;margin:6px 0}
 
+  /* end-screen stats */
+  .stats{display:flex;gap:clamp(20px,7vw,64px);font-family:var(--mono)}
+  .stats>div{display:flex;flex-direction:column;gap:6px}
+  .sk{font-size:clamp(11px,1.8vw,14px);color:var(--mute);letter-spacing:.18em}
+  .sv{font-size:clamp(20px,4.2vw,34px);color:var(--cool);font-weight:700;font-variant-numeric:tabular-nums}
+
+  /* pause + count-in */
+  #cd{background:rgba(10,13,18,.93);gap:0;z-index:6}
+  #cdNum{font-family:var(--mono);font-weight:700;line-height:1;color:var(--lamp);
+    font-size:clamp(80px,24vw,200px);text-shadow:0 0 44px rgba(255,176,32,.45)}
+  #cdNum.pop{animation:pop .45s ease}
+  @keyframes pop{0%{transform:scale(.55);opacity:.15}45%{transform:scale(1);opacity:1}100%{transform:scale(1);opacity:1}}
+
   /* mode selector (segmented) */
   .modes{display:inline-flex;background:var(--raise);border:1px solid var(--edge);border-radius:14px;padding:4px;gap:4px}
   .mode{font-family:var(--sans);font-size:clamp(14px,2.4vw,18px);font-weight:700;color:var(--mute);
@@ -161,7 +176,7 @@
   <!-- ===== START ===== -->
   <div class="overlay" id="start">
     <h1>二進位<span class="lit">快打</span></h1>
-    <p class="lede">用手指把左邊五盞燈點亮，讓亮燈的位值 <b>16 8 4 2 1</b> 加起來等於目標數字。點對就自動換下一題。</p>
+    <p class="lede">用手指把左邊五盞燈點亮，讓亮燈的位值 <b>16 8 4 2 1</b> 加起來等於目標數字。點對就自動換下一題。<br>每題都會計時，結束時看<b>平均一題幾秒</b>；中途暫停的那一題不列入平均。</p>
 
     <div class="modes" role="tablist">
       <button class="mode sel" id="modeRandom">隨機挑戰</button>
@@ -185,7 +200,11 @@
   <div class="screen hidden" id="game">
     <div class="bar">
       <div class="gauge" id="time"><div class="k">時間</div><div class="v" id="timeV">60</div></div>
-      <button class="mini hidden" id="stopBtn">結束</button>
+      <div class="gauge small" id="avg"><div class="k">平均</div><div class="v" id="avgV">–</div></div>
+      <div class="barbtns">
+        <button class="mini" id="pauseBtn">暫停</button>
+        <button class="mini hidden" id="stopBtn">結束</button>
+      </div>
       <div class="gauge" id="score" style="text-align:right"><div class="k">答對</div><div class="v" id="scoreV">0</div></div>
     </div>
 
@@ -209,10 +228,27 @@
   </div>
   <div class="flashmark" id="mark">✓</div>
 
+  <!-- ===== PAUSE ===== -->
+  <div class="overlay hidden" id="pause">
+    <h1>已<span class="lit">暫停</span></h1>
+    <p class="lede" id="pauseWhy">暫停中。</p>
+    <p class="lede">按「繼續」會倒數 <b>3 秒</b>再開始，<b>這一題不列入平均</b>。</p>
+    <button class="btn" id="resumeBtn">繼續</button>
+    <button class="link" id="quitBtn">結束這局</button>
+  </div>
+
+  <!-- ===== COUNT-IN ===== -->
+  <div class="overlay hidden" id="cd"><div id="cdNum">3</div></div>
+
   <!-- ===== END ===== -->
   <div class="overlay hidden" id="end">
     <h1 id="endTitle">時間到</h1>
     <div class="final">你答對了<b id="finalV">0</b>題</div>
+    <div class="stats">
+      <div><span class="sk">平均每題</span><span class="sv" id="statAvg">–</span></div>
+      <div><span class="sk">最快</span><span class="sv" id="statBest">–</span></div>
+      <div><span class="sk">計時題數</span><span class="sv" id="statN">0</span></div>
+    </div>
     <button class="btn" id="againBtn">再玩一次</button>
   </div>
 
@@ -235,6 +271,11 @@
   let mode='random', pool=[], selected=new Set();
   const timedTotal=60;
 
+  // per-question stopwatch
+  let times=[], qStart=0, qAcc=0, qOn=false, qCounted=true;
+  let paused=false, idleTid=null, cdTid=null;
+  const IDLE_MS = 20000;   // practice mode: 20s with no tap = you walked away
+
   const value = () => bits.reduce((a,b,i)=>a+b*PLACE[i],0);
 
   function render(){
@@ -251,8 +292,21 @@
     prev = t; target = t; targetV.textContent = t;
   }
 
+  // ---- per-question stopwatch ----
+  function qBegin(){ qAcc=0; qStart=performance.now(); qOn=true; qCounted=true; armIdle(); }
+  function qHold(){ if(qOn){ qAcc += performance.now()-qStart; qOn=false; } clearTimeout(idleTid); }
+  function qSecs(){ return (qAcc + (qOn ? performance.now()-qStart : 0)) / 1000; }
+  function armIdle(){
+    clearTimeout(idleTid);
+    if (!running || paused || mode !== 'practice') return;   // timed mode already has a clock
+    idleTid = setTimeout(()=>pauseGame('idle'), IDLE_MS);
+  }
+  const avgSecs = () => times.length ? times.reduce((a,b)=>a+b,0)/times.length : null;
+  function showAvg(){ const a=avgSecs(); $('#avgV').textContent = a==null ? '–' : a.toFixed(1)+'s'; }
+
   function toggle(indices){
-    if (locked || !running) return;
+    if (locked || !running || paused) return;
+    armIdle();
     indices.forEach(i => bits[i] ^= 1);
     render();
     if (value() === target) correct();
@@ -260,7 +314,9 @@
 
   function correct(){
     locked = true;
-    score++; scoreV.textContent = score;
+    if (qCounted) times.push(qSecs());
+    qHold();
+    score++; scoreV.textContent = score; showAvg();
     field.classList.add('correct');
     mark.classList.add('go');
     beep(); try{ navigator.vibrate && navigator.vibrate(30); }catch(e){}
@@ -269,7 +325,52 @@
       bits = [0,0,0,0,0];
       nextTarget(); render();
       locked = false;
+      if (running && !paused) qBegin();
     }, 420);
+  }
+
+  // ---- pause / resume ----
+  function pauseGame(why){
+    if (!running || paused) return;
+    paused = true; qCounted = false;          // this question no longer counts
+    qHold(); clearInterval(tid);
+    $('#pauseWhy').textContent =
+      why === 'idle' ? '超過 20 秒沒有動作，已自動暫停。' :
+      why === 'away' ? '你切換到別的畫面，已自動暫停。' :
+                       '休息一下，計時已停住。';
+    $('#pause').classList.remove('hidden');
+  }
+
+  function resumeGame(){
+    if (!paused) return;
+    $('#pause').classList.add('hidden');
+    countIn(3, ()=>{
+      paused = false;
+      qAcc = 0; qStart = performance.now(); qOn = true;   // re-time from here, but not counted
+      armIdle();
+      if (mode === 'random'){ clearInterval(tid); tid = setInterval(tick, 1000); }
+    });
+  }
+
+  function countIn(n, done){
+    const cd = $('#cd'), num = $('#cdNum');
+    let k = n;
+    const paint = txt => { num.textContent = txt; num.classList.remove('pop'); void num.offsetWidth; num.classList.add('pop'); };
+    cd.classList.remove('hidden'); paint(k);
+    clearInterval(cdTid);
+    cdTid = setInterval(()=>{
+      k--;
+      if (k > 0){ paint(k); return; }
+      clearInterval(cdTid); paint('開始');
+      cdTid = setTimeout(()=>{ cdTid = null; cd.classList.add('hidden'); done(); }, 350);
+    }, 700);
+  }
+  // interrupted mid-count-in: drop back to the pause screen
+  function cancelCountIn(){
+    if (!cdTid) return;
+    clearInterval(cdTid); clearTimeout(cdTid); cdTid = null;
+    $('#cd').classList.add('hidden');
+    if (paused) $('#pause').classList.remove('hidden');
   }
 
   function tick(){
@@ -288,23 +389,30 @@
     }
     const timed = (mode === 'random');
     bits = [0,0,0,0,0]; score = 0; prev = 0; timeLeft = timedTotal;
+    times = []; showAvg();
     scoreV.textContent = 0; timeV.textContent = timedTotal; timeEl.classList.remove('low');
     timeEl.classList.toggle('hidden', !timed);       // no clock in practice
     $('#stopBtn').classList.toggle('hidden', timed);  // stop button only in practice
     nextTarget(); render();
-    $('#start').classList.add('hidden'); $('#end').classList.add('hidden');
+    $('#start').classList.add('hidden'); $('#end').classList.add('hidden'); $('#pause').classList.add('hidden');
     $('#game').classList.remove('hidden');
-    running = true; locked = false;
-    clearInterval(tid);
+    running = true; locked = false; paused = false;
+    clearInterval(tid); clearInterval(cdTid);
     if (timed) tid = setInterval(tick, 1000);
+    qBegin();
     initAudio();
   }
 
   function endGame(){
-    clearInterval(tid); running = false;
-    $('#endTitle').textContent = (mode === 'practice') ? '練習結束' : '時間到';
+    clearInterval(tid); clearInterval(cdTid); clearTimeout(idleTid);
+    running = false; paused = false; qHold();
+    const a = avgSecs();
+    $('#endTitle').textContent = (mode === 'practice') ? '練習結束' : (timeLeft > 0 ? '結束' : '時間到');
     $('#finalV').textContent = score;
-    $('#game').classList.add('hidden');
+    $('#statAvg').textContent  = a == null ? '–' : a.toFixed(1) + ' 秒';
+    $('#statBest').textContent = times.length ? Math.min(...times).toFixed(1) + ' 秒' : '–';
+    $('#statN').textContent    = times.length;
+    $('#game').classList.add('hidden'); $('#pause').classList.add('hidden'); $('#cd').classList.add('hidden');
     $('#end').classList.remove('hidden');
   }
 
@@ -330,9 +438,18 @@
   // ---- input: keys 1–5 (desktop testing) ----
   window.addEventListener('keydown', e => {
     if (!running) return;
+    if (e.key === 'Escape' || e.key === 'p' || e.key === 'P'){
+      paused ? resumeGame() : pauseGame('manual');
+      return;
+    }
+    if (paused) return;
     const n = '12345'.indexOf(e.key);
     if (n >= 0) toggle(new Set([n]));
   });
+
+  // leaving the page / locking the phone pauses instead of inflating the average
+  document.addEventListener('visibilitychange', ()=>{ if (document.hidden){ cancelCountIn(); pauseGame('away'); } });
+  window.addEventListener('blur', ()=>{ cancelCountIn(); pauseGame('away'); });
 
   // block iOS pinch / double-tap zoom on the play area
   document.addEventListener('gesturestart', e => e.preventDefault());
@@ -390,6 +507,9 @@
   $('#modeRandom').addEventListener('click',()=>setMode('random'));
   $('#modePractice').addEventListener('click',()=>setMode('practice'));
   $('#stopBtn').addEventListener('click', endGame);
+  $('#pauseBtn').addEventListener('click', ()=>pauseGame('manual'));
+  $('#resumeBtn').addEventListener('click', resumeGame);
+  $('#quitBtn').addEventListener('click', endGame);
   updateStartBtn();
 
   $('#startBtn').addEventListener('click', startGame);
